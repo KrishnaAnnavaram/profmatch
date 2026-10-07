@@ -1,0 +1,20 @@
+# Page rules for `profmatch scrape`. Copy this file, change the values for a portal that you are
+# allowed to read, and set PROFMATCH_PORTAL_TERMS_ACCEPTED=yes after you read its terms of use.
+base_url = "https://faculty-portal.example.org"
+directory_paths = ["/directory?dept=data-science"]
+profile_link_contains = "/profile/"
+name_tag = "h1"
+title_prefix = "Title:"
+department_prefix = "Department:"
+publication_headings = ["publications"]
+keyword_headings = ["keywords", "research interests"]
+exclude_terms = []          # for example the current term, which has no complete scores yet
+
+[aliases]                   # header names of the teaching table; add the names that the portal uses
+course = ["course", "course code", "course id"]
+course_title = ["course name", "course title"]
+term = ["term", "session", "period"]
+enrolled = ["enrolled", "enrollment", "headcount"]
+responses = ["responses", "respondents", "number of responses"]
+overall_rating = ["overall rating", "rating"]
+challenge_index = ["challenge index"]

@@ -1,0 +1,35 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# data and outputs are never committed (see data/README.md)
+/data/*
+!/data/README.md
+/artifacts/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# scraped pages and catalog exports (personal data: never commit)
+*.db
+*.sqlite
+*.sqlite3
+*.xlsx
+/bundle/
+/portal_cache/
