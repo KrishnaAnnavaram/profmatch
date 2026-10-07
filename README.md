@@ -9,7 +9,7 @@
 ![Rankers compared](https://img.shields.io/badge/Rankers_compared-6-1F3864?style=for-the-badge)
 ![nDCG@5](https://img.shields.io/badge/nDCG%405_synthetic-0.817-2E5FD9?style=for-the-badge)
 ![CLI commands](https://img.shields.io/badge/CLI_commands-8-6E86E8?style=for-the-badge)
-![Tests](https://img.shields.io/badge/Tests-50_passing-3DA35B?style=for-the-badge)
+![Tests](https://img.shields.io/badge/Tests-49_passing-3DA35B?style=for-the-badge)
 ![Offline demo](https://img.shields.io/badge/Offline_demo-Yes-F5C542?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-A0399B?style=for-the-badge)
 
@@ -34,6 +34,10 @@
 > [Glossary](#15-glossary) has only one meaning.
 
 ---
+
+> [!CAUTION]
+> Do not use profmatch for any decision about a professor, for example hiring, promotion or pay. It is not a ranking of people.
+> A human advisor must check each recommendation. A real catalog is personal data, and evaluation scores have known biases.
 
 profmatch scores each candidate professor against the query itself. The score adds a text match between the query and one research profile for each professor, a smoothed teaching rating and a challenge fit.
 Each result has reasons: the matched terms, the response count and the challenge level.
@@ -104,7 +108,7 @@ profmatch gives each of these questions its own component. Each component has a 
 | Matchers | `tfidf` (default), `bm25`, `sbert:<model>` (optional) |
 | Offline mode | The synthetic catalog, the TF-IDF and BM25 matchers, SQLite and the CLI. No key and no network |
 | Safety | Exact course codes, no raw scores in the default output, a terms check before a scrape, no CORS by default |
-| Tests | **50** unit tests (`pytest`): 49 pass and 1 skips in CI (the API test needs the extra `api`) |
+| Tests | **49** pass in CI (`.[dev]` only) and 1 skips (the API test needs the extra `api`). With the `api` extra, all 50 pass |
 
 ```mermaid
 flowchart LR
@@ -451,8 +455,7 @@ Planned milestones (not built):
 
 | Validation | Result | Command |
 |---|---|---|
-| Unit tests (local, with the extra `api`) | **50 passed** | `pytest -q` |
-| Unit tests (CI simulation, clean venv, `.[dev]` only) | **49 passed, 1 skipped** | `pip install -e ".[dev]"`, `pytest -q` |
+| Unit tests | CI installs only `.[dev]`: **49 passed**, 1 skipped (`api` extra). With the extras: 50 passed | `pip install -e ".[dev]"`, `pytest -q` |
 | Weight tuning on 40 dev queries | Weights text 0.4, quality 0.4, fit 0.2. Dev nDCG@5 0.900 | `profmatch demo` |
 | `scorer` on 40 test queries | nDCG@5 **0.817**, MRR 0.988, recall@5 0.642, coverage 1.000 | `profmatch demo` |
 | `raw_mean` (no shrinkage) | nDCG@5 0.780, MRR 0.971, recall@5 0.630, coverage 0.917 | `profmatch demo` |
