@@ -72,6 +72,7 @@ This README is the **one location that explains all of profmatch**. It gives the
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one query](#42-the-life-cycle-of-one-query)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 🔵 [Ingestion and the catalog](#5-ingestion-and-the-catalog)
 6. 🟢 [Profiles, matchers and teaching signals](#6-profiles-matchers-and-teaching-signals)
 7. 🟣 [The scorer and the evaluation](#7-the-scorer-and-the-evaluation)
@@ -137,6 +138,53 @@ flowchart LR
 | HTTP API | `src/profmatch/api.py` | FastAPI app with a form (extra `api`) |
 | CLI | `src/profmatch/cli.py` | The `profmatch` command with 8 subcommands |
 
+The component map shows which module calls which module. An arrow points from the caller to the module that it uses.
+
+```mermaid
+flowchart TB
+    subgraph ENTRY["Entry points"]
+        CLI["cli.py<br/>profmatch command"]
+        API["api.py<br/>FastAPI app, extra api"]
+        CFG["config.py<br/>Settings"]
+    end
+    subgraph DATA["Catalog"]
+        ING["ingest/<br/>scrape, parse_profile, HttpFetcher"]
+        SYN["synthetic.py<br/>make_catalog, make_queries"]
+        SCH["schema.py<br/>read_bundle, write_bundle"]
+        STO["store.py<br/>save, load"]
+        TXT["textproc.py<br/>tokens, parse_course_code"]
+    end
+    subgraph RANK["Ranking"]
+        REC["recommend.py<br/>Recommender, Query, Weights"]
+        PRO["profiles.py<br/>build_profiles"]
+        ENC["encoders.py<br/>TfidfMatcher, Bm25Matcher"]
+        SIG["signals.py<br/>compute_signals"]
+        EVA["evaluate.py<br/>full_report"]
+    end
+    CLI --> CFG
+    CLI --> ING
+    CLI --> SYN
+    CLI --> SCH
+    CLI --> STO
+    CLI --> REC
+    CLI --> EVA
+    CLI -- "serve" --> API
+    API --> CFG
+    API --> STO
+    API --> REC
+    ING --> SCH
+    ING --> TXT
+    SYN --> SCH
+    SCH --> TXT
+    EVA --> REC
+    REC --> PRO
+    REC --> ENC
+    REC --> SIG
+    REC --> TXT
+    PRO --> TXT
+    ENC --> TXT
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -190,6 +238,19 @@ The schema accepts an empty rating or challenge. No step fills it with the profe
 ### 3.6 Personal data is protected
 The default output shows quality bands and counts, not raw ratings. The scraper does not start without `PROFMATCH_PORTAL_TERMS_ACCEPTED=yes`, and it obeys `robots.txt`. Git ignores all catalog files.
 
+```mermaid
+flowchart LR
+    P[/"Faculty portal"/] --> T{"PROFMATCH_PORTAL_TERMS_ACCEPTED<br/>= yes?"}
+    T -- "no" --> FE[/"FetchError<br/>no request"/]
+    T -- "yes" --> H["HttpFetcher<br/>portal host only, robots.txt"]
+    H --> B[("CSV bundle in data/<br/>git ignores it")]
+    B --> DB[("artifacts/profmatch.db<br/>git ignores it")]
+    DB --> REC["Recommender"]
+    REC --> D{"PROFMATCH_SIGNAL_DISPLAY"}
+    D -- "band, default" --> BAND[/"Bands and counts,<br/>no raw ratings"/]
+    D -- "value" --> RAW[/"Raw smoothed values"/]
+```
+
 ### 3.7 The HTTP service is closed by default
 The API runs without debug mode. CORS is off until `PROFMATCH_CORS_ORIGINS` lists exact origins, and `*` is refused. No download runs at import time.
 
@@ -200,24 +261,52 @@ The API runs without debug mode. CORS is off until `PROFMATCH_CORS_ORIGINS` list
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    P["Faculty portal"] -.-> S["profmatch scrape"]
-    S --> B["CSV bundle"]
-    X["Export or synthetic bundle"] --> B
-    B --> V["read_bundle: validate"]
-    V --> DB["SQLite: save"]
+flowchart TD
+    P[/"Faculty portal"/] -.-> S["profmatch scrape"]
+    S --> B[/"CSV bundle"/]
+    X[/"Export or synthetic bundle"/] --> B
+    B --> V{"read_bundle:<br/>all rows valid?"}
+    V -- "no" --> SE[/"SchemaError<br/>with all problems"/]
+    V -- "yes" --> DB[("SQLite catalog<br/>store.save")]
     DB --> R["Recommender: profiles, matcher fit, overall signals"]
-    Q["Query"] --> QV["Query.validated"]
-    QV --> C{"Course given?"}
+    Q[/"Query: interests, course,<br/>challenge, k"/] --> QV{"Query.validated"}
+    QV -- "not valid" --> QE[/"QueryError or CourseCodeError"/]
+    QV -- "valid" --> C{"Course given?"}
     C -- "yes" --> CT["Teachers of the course"]
     C -- "no" --> CM["Professors with a text match above 0"]
     CT --> SC["score = w_text x text + w_quality x quality + w_fit x fit"]
     CM --> SC
     R --> SC
-    SC --> OUT["Top k with reasons"]
+    SC --> OUT[/"Top k with reasons and notes"/]
+    OUT --> HUMAN{{"HUMAN<br/>advisor checks each recommendation"}}
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUMAN human
 ```
 
 ### 4.2 The life cycle of one query
+
+```mermaid
+stateDiagram-v2
+    state "Raw query" as Raw
+    state "Validated query" as Valid
+    state "Candidates" as Cands
+    state "Scored rows" as Scored
+    state "Result with reasons" as Result
+    state "Advisor check" as Review
+    [*] --> Raw: interests, course, challenge, k
+    Raw --> CourseCodeError: course code not ABCD 1234
+    Raw --> QueryError: bad challenge, no content or k out of range
+    Raw --> Valid: Query.validated
+    Valid --> QueryError: unknown course
+    Valid --> Cands: teachers_of the course, or text match above 0
+    Cands --> Scored: text, quality, challenge fit, weights
+    Scored --> Result: sort by score then professor_id, top k
+    Result --> Review: reasons, counts and notes
+    Review --> [*]
+    QueryError --> [*]
+    CourseCodeError --> [*]
+```
 
 1. The learner gives interests, a course code, a challenge preference and `k`.
 2. `Query.validated` parses the course code, checks the preference and checks that the query has content.
@@ -228,11 +317,61 @@ flowchart TB
 7. The scorer adds the three weighted terms and sorts by score, then by `professor_id`.
 8. The result gives the top `k`, the reasons and a note when the course has fewer than `k` teachers.
 
+### 4.3 Who does which step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor L as Learner
+    participant WEB as HTTP form
+    participant API as FastAPI app
+    participant DB as SQLite catalog
+    participant REC as Recommender
+    participant M as Matcher
+    participant SIG as signals.py
+
+    Note over API,SIG: profmatch serve, once at start
+    API->>API: Settings.from_env, .env and environment
+    API->>DB: store.load(PROFMATCH_DB)
+    DB-->>API: Catalog
+    API->>REC: Recommender(catalog, matcher, weights)
+    REC->>REC: build_profiles
+    REC->>M: fit(all profiles)
+    REC->>SIG: compute_signals, overall
+    Note over L,SIG: one query
+    L->>WEB: interests, course, challenge
+    WEB->>API: POST /recommend with JSON body
+    API->>REC: recommend(Query)
+    REC->>REC: Query.validated
+    REC->>M: scores(interests)
+    M-->>REC: text match for each professor
+    REC->>SIG: compute_signals for the course
+    SIG-->>REC: TeachingSignals
+    REC->>REC: weighted score, sort, top k
+    REC->>M: matched_terms for each result
+    REC-->>API: Result with reasons and notes
+    API-->>WEB: JSON, or 422 for a bad query
+    WEB-->>L: list with textContent
+```
+
 ---
 
 ## 5. Ingestion and the catalog
 
 **Purpose.** Change portal pages or files into one validated catalog in SQLite.
+
+```mermaid
+flowchart LR
+    CFG[/"portal.toml<br/>PortalConfig.from_toml"/] --> F["HttpFetcher<br/>terms check, robots.txt"]
+    F --> DIR["For each directory_paths entry:<br/>get and parse the page"]
+    DIR --> LNK["links that contain<br/>profile_link_contains, each once"]
+    LNK --> PP["For each profile link:<br/>get, then parse_profile"]
+    PP --> CAT["Catalog and ScrapeReport<br/>profiles, offerings, warnings"]
+    DIR -- "FetchError" --> W["Add a warning,<br/>continue"]
+    PP -- "FetchError" --> W
+    CAT --> WB["write_bundle"]
+    WB --> OUT[("CSV bundle<br/>5 files")]
+```
 
 | Input | Output |
 |---|---|
@@ -243,9 +382,103 @@ flowchart TB
 1. `profmatch scrape` reads the directory pages and collects each profile link once.
 2. `parse_profile` reads the name, the title and the department, then the teaching table by header names.
 3. The parser reads publications and keywords from the list or paragraph after a matching heading.
-4. A bad row (bad code, bad counts) or a missing section gives a warning. The scrape continues.
+4. A bad row (bad code, bad counts), a missing teaching table or a page with no name gives a warning. The scrape continues. A missing publication or keyword section gives an empty part and no warning.
 5. `profmatch load` reads the five CSV files. `read_bundle` collects all problems and raises one `SchemaError`.
 6. `save` replaces the database content in one transaction. SQLite `CHECK` rules repeat the range rules.
+
+The diagram shows how `parse_profile` reads one profile page.
+
+```mermaid
+flowchart TD
+    H[/"profile HTML and pid"/] --> PR["html.parse<br/>stdlib HTMLParser tree"]
+    PR --> NM{"name in name_tag?"}
+    NM -- "no" --> SK[/"warning: page skipped"/]
+    NM -- "yes" --> PF["Professor: name,<br/>Title: and Department: values"]
+    PF --> TR["table_records<br/>first table with course, term,<br/>enrolled, responses by alias"]
+    TR --> NT{"Table found?"}
+    NT -- "no" --> W1["warning: no teaching table"]
+    NT -- "yes" --> ROW{"For each row:<br/>term excluded?"}
+    ROW -- "yes" --> SKR["Skip the row"]
+    ROW -- "no" --> CC{"parse_course_code<br/>valid?"}
+    CC -- "no" --> W2["warning: bad course code"]
+    CC -- "yes" --> CN{"Counts present and<br/>responses at most enrolled?"}
+    CN -- "no" --> W3["warning: bad counts"]
+    CN -- "yes" --> SC["Scores: none for 0 responses,<br/>none outside 1-5 or 1-7"]
+    SC --> OF["Add Offering,<br/>add Course if new"]
+    W1 --> SEC["section_items<br/>publications and keywords"]
+    OF --> SEC
+```
+
+The diagram shows how `HttpFetcher.get` reads one page.
+
+```mermaid
+flowchart TD
+    U[/"url"/] --> J["urljoin with base_url"]
+    J --> HOST{"Same host as<br/>the portal?"}
+    HOST -- "no" --> FE[/"FetchError"/]
+    HOST -- "yes" --> CA{"Page in the cache?<br/>SHA-1 of the URL"}
+    CA -- "yes" --> HIT[/"Cached HTML"/]
+    CA -- "no" --> RB{"robots.txt<br/>allows the URL?"}
+    RB -- "no" --> FE
+    RB -- "yes" --> WT["Wait until --interval seconds<br/>after the last request"]
+    WT --> GET["HTTP GET"]
+    GET --> ST{"Status 200?"}
+    ST -- "no" --> FE
+    ST -- "yes" --> SAVE["Write the cache file"]
+    SAVE --> OUT[/"HTML"/]
+```
+
+The diagram shows how `profmatch load` validates the bundle and writes the catalog.
+
+```mermaid
+flowchart TD
+    B[/"Bundle folder<br/>5 CSV files"/] --> RD["_rows: file and<br/>required columns"]
+    RD --> PRO["professors: id and name,<br/>no duplicates"]
+    PRO --> CRS["courses: parse_course_code,<br/>no duplicates"]
+    CRS --> OFF["offerings: known professor and course,<br/>counts, rating 1-5, challenge 1-7,<br/>responses at most enrolled,<br/>no scores with 0 responses"]
+    OFF --> PK["publications and keywords:<br/>known professor"]
+    PK --> P{"Any problem?"}
+    P -- "yes" --> SE[/"SchemaError<br/>all problems in one message"/]
+    P -- "no" --> SV["store.save<br/>DELETE all rows, INSERT, one transaction"]
+    SV --> DB[("profmatch.db<br/>CHECK rules")]
+```
+
+```mermaid
+erDiagram
+    professors ||--o{ offerings : "professor_id"
+    courses ||--o{ offerings : "course_code"
+    professors ||--o{ publications : "professor_id"
+    professors ||--o{ keywords : "professor_id"
+    professors {
+        TEXT professor_id PK
+        TEXT name
+        TEXT title
+        TEXT department
+    }
+    courses {
+        TEXT course_code PK
+        TEXT course_title
+        TEXT department
+    }
+    offerings {
+        TEXT professor_id FK
+        TEXT course_code FK
+        TEXT term
+        INTEGER enrolled "0 or more"
+        INTEGER responses "0 to enrolled"
+        REAL overall_rating "NULL or 1 to 5"
+        REAL challenge_index "NULL or 1 to 7"
+    }
+    publications {
+        TEXT professor_id FK
+        TEXT title
+        INTEGER year
+    }
+    keywords {
+        TEXT professor_id FK
+        TEXT keyword
+    }
+```
 
 **Rules**
 
@@ -259,9 +492,39 @@ flowchart TB
 
 **Purpose.** Give each professor one text profile and one set of teaching signals.
 
+```mermaid
+flowchart LR
+    CAT[/"Catalog"/] --> CT["Course titles<br/>each code once"]
+    CAT --> PB["Publication titles<br/>50 newest by year"]
+    CAT --> KW["Keywords"]
+    CT --> NO["normalise<br/>tokens, no stop words"]
+    PB --> NO
+    KW --> NO
+    NO --> PR["Profile for each professor<br/>text, course_codes, parts, no name"]
+    PR --> FIT["matcher.fit<br/>on all profiles, once"]
+    FIT --> M[("Fitted matcher")]
+```
+
 | Input | Output |
 |---|---|
 | The catalog | `Profile` for each professor, a fitted matcher, `TeachingSignals` for each professor |
+
+The diagram shows how each matcher gives a text match from 0 to 1.
+
+```mermaid
+flowchart LR
+    Q[/"interests"/] --> BM{"PROFMATCH_MATCHER<br/>build_matcher"}
+    BM -- "tfidf" --> TF["TfidfVectorizer transform<br/>unigrams and bigrams, sublinear tf"]
+    TF --> COS["Cosine with each<br/>L2-normalised profile row"]
+    BM -- "bm25" --> B25["Okapi BM25<br/>k1 1.5, b 0.75"]
+    B25 --> DIV["Divide by the best<br/>score of the query"]
+    BM -- "sbert:model" --> SB["sentence-transformers<br/>normalised embeddings"]
+    SB --> DOT["Dot product,<br/>negative values to 0"]
+    BM -- "other" --> VE[/"ValueError"/]
+    COS --> OUT[/"text match for each professor<br/>and matched_terms"/]
+    DIV --> OUT
+    DOT --> OUT
+```
 
 **Procedure**
 
@@ -282,6 +545,25 @@ flowchart TB
 | 2 responses, all 5.0, prior 4.3 | 5.00 | 4.36 |
 | 60 responses, mean 4.5, prior 4.3 | 4.50 | 4.45 |
 
+The diagram shows how `compute_signals` makes the teaching signals.
+
+```mermaid
+flowchart TD
+    CAT[/"Catalog, prior strength m,<br/>min_responses, course_code"/] --> PRI["Response-weighted prior<br/>of rating and challenge, all offerings"]
+    PRI --> OV["_raw_values over all offerings<br/>smoothed rating and challenge"]
+    OV --> TER{"3 or more professors<br/>with responses?"}
+    TER -- "yes" --> CUT["Tertile cuts of the<br/>overall smoothed values"]
+    TER -- "no" --> NOB["No cuts, no bands"]
+    PRI --> CRS{"course_code given?"}
+    CRS -- "yes" --> RC["_raw_values over the<br/>offerings of the course"]
+    CRS -- "no" --> RO["Use the overall values"]
+    RC --> TS["TeachingSignals for each professor"]
+    RO --> TS
+    CUT --> TS
+    NOB --> TS
+    TS --> OUT[/"responses, response_rate, rating, challenge,<br/>challenge_level, quality_band, sufficient"/]
+```
+
 ---
 
 ## 7. The scorer and the evaluation
@@ -293,12 +575,71 @@ flowchart TB
 | `Query`, `Weights` | `Result` with recommendations, candidate count and notes |
 | Labelled queries (`queries.jsonl`) | nDCG@5, MRR, recall@5 and coverage for each ranker |
 
+```mermaid
+flowchart TD
+    Q[/"Query"/] --> V["Query.validated"]
+    V --> C{"Course given?"}
+    C -- "yes" --> K{"Course in<br/>the catalog?"}
+    K -- "no" --> QE[/"QueryError: unknown course"/]
+    K -- "yes" --> T1["Candidates: teachers_of the course"]
+    C -- "no" --> T2["Candidates: professors with<br/>a text match above 0"]
+    T2 --> E{"Any candidate?"}
+    E -- "no" --> N1["Note: no profile matches"]
+    T1 --> SIG["signals_for the course,<br/>or the overall signals"]
+    E -- "yes" --> SIG
+    SIG --> SC["score = w_text x text<br/>+ w_quality x quality_score<br/>+ w_fit x challenge_fit"]
+    SC --> SRT["Sort: higher score first,<br/>then professor_id"]
+    SRT --> FEW{"Course and fewer<br/>than k rows?"}
+    FEW -- "yes" --> N2["Note: only n professors<br/>taught the course"]
+    FEW -- "no" --> TOP
+    N2 --> TOP["Top k Recommendation rows"]
+    TOP --> OUT[/"Result: recommendations,<br/>candidates, notes"/]
+```
+
+The diagram shows how `recommend` writes the reasons for one result.
+
+```mermaid
+flowchart LR
+    R[/"One scored professor"/] --> MT{"Text match above 0?"}
+    MT -- "yes" --> R1["profile matches:<br/>matched_terms"]
+    MT -- "no" --> CO
+    R1 --> CO{"Course in the query?"}
+    CO -- "yes" --> R2["taught the course"]
+    CO -- "no" --> QB
+    R2 --> QB{"quality_band known?"}
+    QB -- "yes" --> R3["rating band<br/>with the response count"]
+    QB -- "no" --> R4["no rating band<br/>with the response count"]
+    R3 --> SU{"sufficient?"}
+    R4 --> SU
+    SU -- "no" --> R5["few responses: the rating<br/>stays near the mean"]
+    SU -- "yes" --> CH
+    R5 --> CH{"Preference and<br/>challenge_level known?"}
+    CH -- "yes" --> R6["challenge level<br/>and preference"]
+    CH -- "no" --> OUT[/"reasons list"/]
+    R6 --> OUT
+```
+
 **Procedure**
 
 1. `split_queries` puts the even positions in dev and the odd positions in test.
 2. `tune_weights` tries each weight triple on a 0.1 grid with a text weight above 0 and keeps the best dev nDCG@5.
 3. `full_report` scores six rankers on the test half with the tuned weights.
 4. `ndcg_at_k` compares the ranking with the ideal order of the candidates. A grade of 2 or more counts as relevant for MRR and recall.
+
+```mermaid
+flowchart TD
+    QF[/"queries.jsonl<br/>read_queries"/] --> SPL["split_queries<br/>even = dev, odd = test"]
+    SPL -- "dev" --> TUN{"--tune?"}
+    TUN -- "yes" --> GRID["tune_weights: weight_grid, step 0.1,<br/>text above 0, best dev nDCG@5"]
+    TUN -- "no" --> SW["PROFMATCH_WEIGHTS"]
+    GRID --> W["Weights"]
+    SW --> W
+    W --> RK["6 rankers: scorer, raw_mean, text_only,<br/>popularity, random, legacy_knn"]
+    SPL -- "test" --> EV["evaluate_ranker<br/>on each test query"]
+    RK --> EV
+    EV --> MET["ndcg_at_k, reciprocal_rank,<br/>recall_at_k, coverage"]
+    MET --> OUT[/"Report JSON<br/>tuned_on_dev and test"/]
+```
 
 **The rankers**
 
@@ -314,6 +655,23 @@ flowchart TB
 ---
 
 ## 8. The decision rules
+
+The diagram shows how `challenge_fit` and `quality_score` give the two signal terms of the score.
+
+```mermaid
+flowchart TD
+    S[/"TeachingSignals and<br/>challenge preference"/] --> P{"Preference given?"}
+    P -- "no" --> F0[/"fit 0.0"/]
+    P -- "yes" --> L{"challenge_level known?"}
+    L -- "no" --> F5[/"fit 0.5"/]
+    L -- "yes" --> G{"Distance between<br/>level and preference"}
+    G -- "0" --> F1[/"fit 1.0"/]
+    G -- "1" --> F5
+    G -- "2" --> F0
+    S --> R{"Smoothed rating known?"}
+    R -- "yes" --> Q1[/"quality = rating - 1, divided by 4"/]
+    R -- "no" --> Q2[/"quality 0.5"/]
+```
 
 | Rule | Value | Where |
 |---|---|---|
@@ -413,6 +771,24 @@ profmatch load data/bundle
 profmatch serve --port 8000                       # http://127.0.0.1:8000
 ```
 
+The diagram shows the order of the commands and the files that connect them.
+
+```mermaid
+flowchart LR
+    INS["pip install -e .[dev]"] --> SYN["profmatch synth"]
+    INS --> SCR["profmatch scrape<br/>extra scrape, terms check"]
+    SYN --> BUN[("CSV bundle<br/>and queries.jsonl")]
+    SCR --> BUN
+    BUN --> LOAD["profmatch load"]
+    LOAD --> DB[("artifacts/profmatch.db")]
+    DB --> REC["profmatch recommend"]
+    DB --> PRO["profmatch profile"]
+    DB --> EV["profmatch eval<br/>with queries.jsonl"]
+    DB --> SRV["profmatch serve<br/>extra api"]
+    INS --> DEMO["profmatch demo<br/>synth, load, eval, one example"]
+    DEMO --> SUM[("artifacts/demo/<br/>demo_summary.json")]
+```
+
 ### 10.4 Environment variables
 
 | Variable | Used by | Meaning |
@@ -429,6 +805,21 @@ profmatch serve --port 8000                       # http://127.0.0.1:8000
 
 A bad value stops the command with `error:`.
 Credentials are only in a local `.env` file. Git ignores this file. Do not print or commit credentials.
+
+```mermaid
+flowchart LR
+    DOT[/".env file<br/>load_dotenv"/] --> MRG["Merge: the process<br/>environment wins"]
+    ENV[/"Process environment"/] --> MRG
+    MRG --> W{"PROFMATCH_WEIGHTS<br/>3 numbers, 0 or more, sum above 0?"}
+    W -- "no" --> ERR[/"ConfigError: the CLI prints<br/>error: and returns 2"/]
+    W -- "yes" --> N{"PRIOR_STRENGTH and<br/>MIN_RESPONSES numbers, 0 or more?"}
+    N -- "no" --> ERR
+    N -- "yes" --> D{"SIGNAL_DISPLAY<br/>band or value?"}
+    D -- "no" --> ERR
+    D -- "yes" --> C{"CORS_ORIGINS<br/>without *?"}
+    C -- "no" --> ERR
+    C -- "yes" --> SET[/"Settings"/]
+```
 
 ---
 
